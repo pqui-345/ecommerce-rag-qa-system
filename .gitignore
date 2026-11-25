@@ -1,0 +1,26 @@
+# Dữ liệu & nhật ký
+data/
+logs/
+
+# Báo cáo luận văn, slide & file biên dịch không đẩy lên Git
+baocao/
+reports/bao_cao_tien_xl/
+reports/*.csv
+
+# Môi trường & bí mật
+.env
+.venv/
+venv/
+
+# Python & kiểm thử
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Hệ điều hành & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
