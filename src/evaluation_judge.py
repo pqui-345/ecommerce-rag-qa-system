@@ -3,6 +3,7 @@ Context Precision) và kiểm định độ đồng thuận Cohen's kappa với 
 """
 
 import json
+import logging
 import os
 import re
 import statistics
@@ -14,6 +15,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Union
 from src.label_verification import tinh_cohens_kappa
 from src.retrieval_bm25 import doc_danh_sach_jsonl
 
+logger = logging.getLogger(__name__)
+
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -22,6 +25,40 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent.parent
 CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
+
+
+def normalize_judge_item(
+    judge_obj: Optional[Dict],
+    is_abstention: bool,
+    item_id: str = "",
+) -> Dict:
+    """Chuẩn hóa điểm số giám khảo và áp dụng fallback đối xứng khi JSON lỗi hoặc thiếu khóa."""
+    if is_abstention:
+        return {
+            "faithfulness": 1.0,
+            "answer_relevance": 0.0,
+            "has_hallucination": 0,
+            "judge_parse_fallback": False,
+        }
+
+    if isinstance(judge_obj, dict) and judge_obj.get("faithfulness") is not None:
+        return {
+            "faithfulness": round(float(judge_obj["faithfulness"]), 4),
+            "answer_relevance": round(float(judge_obj.get("answer_relevance", 0.0) or 0.0), 4),
+            "has_hallucination": int(judge_obj.get("has_hallucination", 0) or 0),
+            "judge_parse_fallback": False,
+        }
+
+    logger.warning(
+        "Judge JSON rỗng hoặc thiếu khóa 'faithfulness' tại qid=%s; áp dụng fallback trung lập.",
+        item_id or "unknown",
+    )
+    return {
+        "faithfulness": 0.0,
+        "answer_relevance": 0.0,
+        "has_hallucination": 0,
+        "judge_parse_fallback": True,
+    }
 
 
 def lay_gemini_api_key(dotenv_path: Optional[Path] = None) -> str:
@@ -283,6 +320,7 @@ def chay_danh_gia_judge_baseline(
                 }
             else:
                 j = judged_direct_map.get(qid, {})
+                norm = normalize_judge_item(j, is_abstention=False, item_id=qid)
                 rec = {
                     "qid_moi": qid,
                     "asin": r.get("asin", ""),
@@ -291,10 +329,11 @@ def chay_danh_gia_judge_baseline(
                     "nhan_chot_chi_tiet": r.get("nhan_chot_chi_tiet", ""),
                     "is_abstention": False,
                     "generated_answer": r.get("generated_answer", ""),
-                    "faithfulness": round(float(j.get("faithfulness", 0.0)), 4),
-                    "answer_relevance": round(float(j.get("answer_relevance", 0.0)), 4),
+                    "faithfulness": norm["faithfulness"],
+                    "answer_relevance": norm["answer_relevance"],
                     "context_precision": 0.0,
-                    "has_hallucination": int(j.get("has_hallucination", 1)),
+                    "has_hallucination": norm["has_hallucination"],
+                    "judge_parse_fallback": norm["judge_parse_fallback"],
                 }
             no_rag_judged_rows.append(rec)
             fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -339,9 +378,7 @@ def chay_danh_gia_judge_baseline(
                     cp = tinh_context_precision_at_k(rel_flags)
 
                     is_abs = bool(r.get("is_abstention", False))
-                    faith = 1.0 if is_abs else round(float(j.get("faithfulness", 1.0)), 4)
-                    ans_rel = 0.0 if is_abs else round(float(j.get("answer_relevance", 0.8)), 4)
-                    has_hallu = 0 if is_abs else int(j.get("has_hallucination", 0))
+                    norm = normalize_judge_item(j, is_abstention=is_abs, item_id=qid)
                     j_ans = int(j.get("judge_answerable", 1 if sum(rel_flags) > 0 else 0))
 
                     rec = {
@@ -355,9 +392,10 @@ def chay_danh_gia_judge_baseline(
                         "chunk_relevance": rel_flags,
                         "judge_answerable": j_ans,
                         "context_precision": cp,
-                        "faithfulness": faith,
-                        "answer_relevance": ans_rel,
-                        "has_hallucination": has_hallu,
+                        "faithfulness": norm["faithfulness"],
+                        "answer_relevance": norm["answer_relevance"],
+                        "has_hallucination": norm["has_hallucination"],
+                        "judge_parse_fallback": norm["judge_parse_fallback"],
                     }
                     existing_rag[qid] = rec
                     f_append.write(json.dumps(rec, ensure_ascii=False) + "\n")

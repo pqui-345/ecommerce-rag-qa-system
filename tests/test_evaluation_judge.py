@@ -6,6 +6,7 @@ from typing import List, Union
 
 from src.evaluation_judge import (
     chay_danh_gia_judge_baseline,
+    normalize_judge_item,
     tao_prompt_cham_batch_no_rag_direct,
     tao_prompt_cham_batch_rag,
     tinh_context_precision_at_k,
@@ -194,3 +195,75 @@ def test_chay_danh_gia_judge_baseline_dong_hong_va_file_rong(tmp_path: Path):
     assert kq["summary_rag"]["faithfulness_direct"] == 1.0
     assert kq["kappa_judge_vs_human_strict"]["kappa"] == 1.0
     assert rep_p.exists()
+
+
+def test_normalize_judge_item_symmetric_fallback(tmp_path: Path):
+    nr_fallback = normalize_judge_item({}, is_abstention=False, item_id="q-err-nr")
+    rag_fallback = normalize_judge_item({}, is_abstention=False, item_id="q-err-rag")
+    assert nr_fallback == rag_fallback
+    assert nr_fallback["faithfulness"] == 0.0
+    assert nr_fallback["answer_relevance"] == 0.0
+    assert nr_fallback["has_hallucination"] == 0
+    assert nr_fallback["judge_parse_fallback"] is True
+
+    abs_res = normalize_judge_item({}, is_abstention=True, item_id="q-abs")
+    assert abs_res["faithfulness"] == 1.0
+    assert abs_res["judge_parse_fallback"] is False
+
+    def _mock_empty_gemini(prompt: str, model_name: str):
+        return []
+
+    eval_p = tmp_path / "eval.jsonl"
+    nr_p = tmp_path / "norag.jsonl"
+    rag_p = tmp_path / "rag.jsonl"
+    out_nr = tmp_path / "out_nr.jsonl"
+    out_rag = tmp_path / "out_rag.jsonl"
+    rep_p = tmp_path / "rep.md"
+
+    eval_p.write_text(
+        json.dumps({"qid_moi": "q-1", "asin": "A1", "question_text_clean": "USB?", "nhan_chot_3_muc": "yes"}) + "\n",
+        encoding="utf-8",
+    )
+    nr_p.write_text(
+        json.dumps(
+            {
+                "qid_moi": "q-1",
+                "asin": "A1",
+                "question_text_clean": "USB?",
+                "nhan_chot_3_muc": "yes",
+                "is_abstention": False,
+                "generated_answer": "Yes.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rag_p.write_text(
+        json.dumps(
+            {
+                "qid_moi": "q-1",
+                "asin": "A1",
+                "question_text_clean": "USB?",
+                "nhan_chot_3_muc": "yes",
+                "retrieved_contexts": ["Supports USB."],
+                "is_abstention": False,
+                "generated_answer": "Yes, USB.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    kq = chay_danh_gia_judge_baseline(
+        eval_labeled_path=eval_p,
+        no_rag_gen_path=nr_p,
+        rag_gen_path=rag_p,
+        out_no_rag_judge_path=out_nr,
+        out_rag_judge_path=out_rag,
+        report_path=rep_p,
+        gemini_call_fn=_mock_empty_gemini,
+    )
+    assert kq["summary_no_rag"]["faithfulness_direct"] == 0.0
+    assert kq["summary_rag"]["faithfulness_direct"] == 0.0
+    assert kq["summary_no_rag"]["hallucination_count_total"] == 0
+    assert kq["summary_rag"]["hallucination_count_total"] == 0

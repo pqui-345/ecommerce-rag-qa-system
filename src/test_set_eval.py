@@ -17,6 +17,7 @@ from src.chunking_eval import (
 )
 from src.evaluation_judge import (
     goi_gemini_json,
+    normalize_judge_item,
     tao_prompt_cham_batch_no_rag_direct,
     tao_prompt_cham_batch_rag,
     tinh_context_precision_at_k,
@@ -369,14 +370,16 @@ def chay_danh_gia_chot_tap_test(
                         bmap = {str(o.get("qid_moi", "")): o for o in (res or []) if isinstance(o, dict)}
                         for r in batch:
                             j = bmap.get(r["qid_moi"], {})
+                            norm = normalize_judge_item(j, is_abstention=False, item_id=r["qid_moi"])
                             rec = {
                                 "qid_moi": r["qid_moi"],
                                 "is_abstention": False,
                                 "context_precision": 0.0,
-                                "faithfulness": round(float(j.get("faithfulness", 0.0)), 4),
-                                "answer_relevance": round(float(j.get("answer_relevance", 0.0)), 4),
-                                "has_hallucination": int(j.get("has_hallucination", 1)),
+                                "faithfulness": norm["faithfulness"],
+                                "answer_relevance": norm["answer_relevance"],
+                                "has_hallucination": norm["has_hallucination"],
                                 "judge_answerable": 0,
+                                "judge_parse_fallback": norm["judge_parse_fallback"],
                             }
                             existing[r["qid_moi"]] = rec
                             fa.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -394,14 +397,16 @@ def chay_danh_gia_chot_tap_test(
                             j = bmap.get(r["qid_moi"], {})
                             flags = [1 if int(x) > 0 else 0 for x in (j.get("chunk_relevance") or [0] * 5)[:5]]
                             is_abs = bool(r["is_abstention"])
+                            norm = normalize_judge_item(j, is_abstention=is_abs, item_id=r["qid_moi"])
                             rec = {
                                 "qid_moi": r["qid_moi"],
                                 "is_abstention": is_abs,
                                 "context_precision": tinh_context_precision_at_k(flags),
-                                "faithfulness": 1.0 if is_abs else round(float(j.get("faithfulness", 1.0)), 4),
-                                "answer_relevance": 0.0 if is_abs else round(float(j.get("answer_relevance", 0.8)), 4),
-                                "has_hallucination": 0 if is_abs else int(j.get("has_hallucination", 0)),
+                                "faithfulness": norm["faithfulness"],
+                                "answer_relevance": norm["answer_relevance"],
+                                "has_hallucination": norm["has_hallucination"],
                                 "judge_answerable": int(j.get("judge_answerable", 1 if sum(flags) > 0 else 0)),
+                                "judge_parse_fallback": norm["judge_parse_fallback"],
                             }
                             existing[r["qid_moi"]] = rec
                             fa.write(json.dumps(rec, ensure_ascii=False) + "\n")

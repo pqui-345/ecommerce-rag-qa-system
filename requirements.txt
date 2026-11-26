@@ -2,3 +2,5 @@ pyyaml
 pytest
 chromadb
 fastembed
+numpy
+httpx

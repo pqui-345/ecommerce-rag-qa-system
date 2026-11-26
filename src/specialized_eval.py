@@ -10,7 +10,11 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 import numpy as np
 
 from src.chunking_eval import _nap_hoac_tinh_embeddings
-from src.evaluation_judge import goi_gemini_json, tinh_context_precision_at_k
+from src.evaluation_judge import (
+    goi_gemini_json,
+    normalize_judge_item,
+    tinh_context_precision_at_k,
+)
 from src.generation_baseline import (
     goi_groq_chat_completion,
     la_cau_tu_choi_tra_loi,
@@ -505,15 +509,17 @@ def chay_rag_va_judge_chinh_sach(
                     j = bmap.get(r["qid_moi"], {})
                     flags = [1 if int(x) > 0 else 0 for x in (j.get("chunk_relevance") or [0] * 5)[:5]]
                     is_abs = bool(r["is_abstention"])
+                    norm = normalize_judge_item(j, is_abstention=is_abs, item_id=r["qid_moi"])
                     jrec = {
                         "qid_moi": r["qid_moi"],
                         "question_category": r["question_category"],
                         "is_abstention": is_abs,
                         "context_precision": tinh_context_precision_at_k(flags),
-                        "faithfulness": 1.0 if is_abs else round(float(j.get("faithfulness", 1.0)), 4),
-                        "answer_relevance": 0.0 if is_abs else round(float(j.get("answer_relevance", 0.8)), 4),
-                        "has_hallucination": 0 if is_abs else int(j.get("has_hallucination", 0)),
+                        "faithfulness": norm["faithfulness"],
+                        "answer_relevance": norm["answer_relevance"],
+                        "has_hallucination": norm["has_hallucination"],
                         "handles_ambiguity": int(j.get("handles_ambiguity", 0)),
+                        "judge_parse_fallback": norm["judge_parse_fallback"],
                         "generated_answer": r["generated_answer"],
                     }
                     existing_j[r["qid_moi"]] = jrec
@@ -658,10 +664,12 @@ def chay_danh_gia_counterfactual(
                 bmap = {str(o.get("qid_moi", "")): o for o in (res_list or []) if isinstance(o, dict)}
                 for r in batch:
                     j = bmap.get(r["qid_moi"], {})
+                    is_fallback = not isinstance(j, dict) or j.get("adheres_counterfactual") is None
                     jrec = {
                         "qid_moi": r["qid_moi"],
-                        "adheres_counterfactual": int(j.get("adheres_counterfactual", 0)),
-                        "reverts_to_prior": int(j.get("reverts_to_prior", 0)),
+                        "adheres_counterfactual": 0 if is_fallback else int(j.get("adheres_counterfactual", 0)),
+                        "reverts_to_prior": 0 if is_fallback else int(j.get("reverts_to_prior", 0)),
+                        "judge_parse_fallback": is_fallback,
                         "generated_answer": r["generated_answer"],
                     }
                     existing_j[r["qid_moi"]] = jrec

@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from src.chunking_eval import mcnemar_exact_pvalue
 from src.evaluation_judge import (
     goi_gemini_json,
+    normalize_judge_item,
     tao_prompt_cham_batch_rag,
     tinh_context_precision_at_k,
 )
@@ -161,9 +162,7 @@ def cham_diem_judge_chien_luoc(
                     cp = tinh_context_precision_at_k(rel_flags)
 
                     is_abs = bool(r.get("is_abstention", False))
-                    faith = 1.0 if is_abs else round(float(j.get("faithfulness", 1.0)), 4)
-                    ans_rel = 0.0 if is_abs else round(float(j.get("answer_relevance", 0.8)), 4)
-                    has_hallu = 0 if is_abs else int(j.get("has_hallucination", 0))
+                    norm = normalize_judge_item(j, is_abstention=is_abs, item_id=qid)
                     j_ans = int(j.get("judge_answerable", 1 if sum(rel_flags) > 0 else 0))
 
                     rec = {
@@ -178,9 +177,10 @@ def cham_diem_judge_chien_luoc(
                         "chunk_relevance": rel_flags,
                         "judge_answerable": j_ans,
                         "context_precision": cp,
-                        "faithfulness": faith,
-                        "answer_relevance": ans_rel,
-                        "has_hallucination": has_hallu,
+                        "faithfulness": norm["faithfulness"],
+                        "answer_relevance": norm["answer_relevance"],
+                        "has_hallucination": norm["has_hallucination"],
+                        "judge_parse_fallback": norm["judge_parse_fallback"],
                     }
                     existing_rag[qid] = rec
                     f_append.write(json.dumps(rec, ensure_ascii=False) + "\n")
