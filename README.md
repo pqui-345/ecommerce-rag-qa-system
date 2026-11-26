@@ -3,7 +3,7 @@
 Hệ thống hỏi đáp thông minh cho lĩnh vực thương mại điện tử kết hợp **Large Language Model (LLM)** và **Retrieval-Augmented Generation (RAG)**, tập trung tối ưu hóa chiến lược phân đoạn văn bản (*chunking*), truy xuất lai (*Hybrid RRF*) và khung đánh giá độ trung thực nhằm định lượng khả năng triệt tiêu ảo giác.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/pytest-80%20passed-brightgreen?logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/pytest-85%20passed-brightgreen?logo=pytest&logoColor=white)
 ![Embedding](https://img.shields.io/badge/Embedding-BAAI%2Fbge--small--en--v1.5-orange)
 ![VectorDB](https://img.shields.io/badge/VectorDB-ChromaDB-purple)
 
@@ -87,8 +87,9 @@ ecommerce-rag-qa-system/
 │   ├── evaluation_judge.py     # Đánh giá Faithfulness & Answer Relevance
 │   ├── policy_corpus.py        # Xây dựng kho văn bản chính sách Shopify Legal
 │   ├── specialized_eval.py     # Đánh giá câu hỏi chuyên biệt & Counterfactual
-│   └── test_set_eval.py        # Đánh giá chốt 1 lần duy nhất trên tập test
-├── tests/                      # Bộ kiểm thử tự động pytest (80/80 passed)
+│   ├── test_set_eval.py        # Đánh giá chốt 1 lần duy nhất trên tập test
+│   └── demo_cli.py             # CLI demo trực tiếp kịch bản bảo vệ
+├── tests/                      # Bộ kiểm thử tự động pytest (85/85 passed)
 └── reports/                    # Bảng tổng hợp số liệu thực nghiệm (.md)
 ```
 
@@ -133,7 +134,23 @@ python -m src.run prepare_test_eval
 python -m src.run run_test_rag_judge
 ```
 
-### 3. Chạy kiểm thử tự động
+### 3. Demo trực tiếp trên Terminal (CLI)
+
+Chạy toàn bộ kịch bản demo 5 bước (tiền xử lý $\rightarrow$ truy xuất BM25 trực tiếp trên CPU $\rightarrow$ đối chiếu `No-RAG` vs. `RAG` $\rightarrow$ thí nghiệm phản thực tế $\rightarrow$ tổng hợp kết quả tập `test`):
+
+```bash
+# Chạy toàn bộ 5 bước demo
+python -m src.demo_cli
+
+# Hoặc chạy riêng từng bước (1..5)
+python -m src.demo_cli --step 2
+
+# Truy vấn thử trực tiếp trên dữ liệu Amazon Electronics hoặc Shopify Legal
+python -m src.demo_cli --query "110 or 220 volt adapter" --source amazon --asin B002RYYZZS
+python -m src.demo_cli --query "What financial remedies does Shopify provide for chargebacks?" --source shopify --top-k 2
+```
+
+### 4. Chạy kiểm thử tự động
 
 ```bash
 pytest -q
