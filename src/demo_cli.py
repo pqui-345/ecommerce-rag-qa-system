@@ -5,13 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.clean import clean_text
+from src.generation_baseline import (
+    goi_groq_chat_completion,
+    la_cau_tu_choi_tra_loi,
+    lay_llm_config,
+    tao_prompt_no_rag,
+    tao_prompt_rag,
+)
 from src.retrieval_bm25 import BM25TinhDiem, bo_stopword, tokenize
+from src.specialized_eval import SYSTEM_PROMPT_POLICY
 
 ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
@@ -132,6 +141,152 @@ def summarize_test_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 def _shorten(text: str, limit: int = 180) -> str:
     clean = " ".join(str(text).split())
     return clean if len(clean) <= limit else clean[: limit - 3] + "..."
+
+
+def build_live_messages(
+    query: str,
+    source: str,
+    hits: Sequence[Tuple[Dict[str, Any], float]],
+    asin: Optional[str] = None,
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    """Tạo cặp prompt No-RAG và RAG (hoặc Policy RAG) cho chế độ hỏi đáp trực tiếp."""
+    contexts = [chunk for chunk, _ in hits]
+    if source == "shopify":
+        no_rag_msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an e-commerce policy QA assistant for Shopify Legal Policies. "
+                    "Answer concisely in 1 to 3 sentences based on your knowledge. "
+                    "If you are not sure, state clearly that you do not have enough information."
+                ),
+            },
+            {"role": "user", "content": f"Policy Question: {query}"},
+        ]
+        blocks = [
+            f"[Passage {i} | {ch.get('passage_id') or ch.get('chunk_id') or f'p{i}'}]\n{(ch.get('text') or '').strip()}"
+            for i, ch in enumerate(contexts, start=1)
+        ]
+        ctx_str = "\n\n".join(blocks) if blocks else "(No policy passages retrieved)"
+        rag_msgs = [
+            {"role": "system", "content": SYSTEM_PROMPT_POLICY},
+            {"role": "user", "content": f"Retrieved Policy Passages:\n{ctx_str}\n\nQuestion: {query}"},
+        ]
+        return no_rag_msgs, rag_msgs
+
+    target_asin = asin or (contexts[0].get("asin") if contexts else "UNKNOWN")
+    no_rag_msgs = tao_prompt_no_rag(str(target_asin), "Electronics", query)
+    rag_msgs = tao_prompt_rag(str(target_asin), "Electronics", query, contexts)
+    return no_rag_msgs, rag_msgs
+
+
+def _load_dotenv_into_env(dotenv_path: Optional[Path] = None) -> None:
+    env_path = dotenv_path or (ROOT / ".env")
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+
+def generate_live_answer(
+    messages: Sequence[Dict[str, str]],
+    model_name: str = "qwen/qwen3.8-27b",
+    timeout_sec: float = 20.0,
+) -> Tuple[Optional[str], str]:
+    """Gọi LLM trực tiếp (ưu tiên Groq/OpenAI-compatible, dự phòng Gemini API)."""
+    _load_dotenv_into_env()
+    try:
+        lay_llm_config()
+        text, meta = goi_groq_chat_completion(
+            messages,
+            model_name=model_name,
+            max_retries=1,
+            timeout_sec=timeout_sec,
+        )
+        return text, f"Groq ({model_name}, {meta.get('latency_sec', 0):.2f}s)"
+    except Exception as groq_exc:
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not gemini_key:
+            return None, f"Offline/Khong co API key ({groq_exc})"
+        try:
+            import httpx
+
+            sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
+            user_parts = [m["content"] for m in messages if m.get("role") != "system"]
+            payload: Dict[str, Any] = {
+                "contents": [{"role": "user", "parts": [{"text": "\n\n".join(user_parts)}]}],
+                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256},
+            }
+            if sys_parts:
+                payload["systemInstruction"] = {"parts": [{"text": "\n".join(sys_parts)}]}
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-2.5-flash:generateContent?key={gemini_key}"
+            )
+            t0 = time.perf_counter()
+            resp = httpx.post(url, json=payload, timeout=timeout_sec)
+            elapsed = time.perf_counter() - t0
+            if resp.status_code == 200:
+                data = resp.json()
+                cands = data.get("candidates") or []
+                parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+                ans = "".join(p.get("text", "") for p in parts).strip()
+                if ans:
+                    return ans, f"Gemini API fallback ({elapsed:.2f}s)"
+            return None, f"API fallback HTTP {resp.status_code}"
+        except Exception as gem_exc:
+            return None, f"Offline/Loi mang ({gem_exc})"
+
+
+def run_live_qa(
+    query: str,
+    source: str = "amazon",
+    asin: Optional[str] = None,
+    top_k: int = 5,
+    model_name: str = "qwen/qwen3.8-27b",
+    generator_fn: Callable[[Sequence[Dict[str, str]], str], Tuple[Optional[str], str]] = generate_live_answer,
+) -> None:
+    """Chạy truy xuất BM25 trên CPU kết hợp sinh câu trả lời trực tiếp No-RAG vs RAG."""
+    _print_header("HOI DAP TRUC TIEP (LIVE RAG DEMO)")
+    if source == "shopify":
+        corpus_path = ROOT / "data" / "processed" / "policy_docs_shopify.jsonl"
+        records = load_shopify_passages(corpus_path)
+        if not records:
+            print(f"- Khong tim thay {corpus_path.relative_to(ROOT)}.")
+            return
+        hits, ms = search_bm25_chunks(records, query, top_k=top_k)
+        print(f"- Nguon: Shopify Legal (527 passages) | Truy xuat BM25: {ms:.2f} ms")
+    else:
+        corpus_path = ROOT / "data" / "processed" / "chunks_dev_recursive.jsonl"
+        records = load_jsonl_records(corpus_path)
+        if not records:
+            print(f"- Khong tim thay {corpus_path.relative_to(ROOT)}.")
+            return
+        hits, ms = search_bm25_chunks(records, query, top_k=top_k, asin=asin)
+        scope = f"ASIN={asin}" if asin else "Toan kho Global"
+        print(f"- Nguon: Amazon Electronics ({scope}) | Truy xuat BM25: {ms:.2f} ms")
+
+    for rank, (chunk, score) in enumerate(hits, start=1):
+        cid = chunk.get("passage_id") or chunk.get("chunk_id")
+        print(f"  #{rank} [{cid}] score={score:.3f} | {_shorten(chunk.get('text', ''), 145)}")
+
+    no_rag_msgs, rag_msgs = build_live_messages(query, source, hits, asin=asin)
+    ans_no_rag, info_0 = generator_fn(no_rag_msgs, model_name)
+    ans_rag, info_1 = generator_fn(rag_msgs, model_name)
+
+    if ans_no_rag is None and ans_rag is None:
+        print(f"\n[Che do du phong Offline] Khong goi duoc LLM ({info_1}).")
+        print("-> Da hien thi Top-K bang chung truy xuat o tren; chay '--step 3' de xem ca mau da cham.")
+        return
+
+    print(f"\n[Ket qua sinh truc tiep]")
+    print(f"  No-RAG ({info_0}) [Tu choi={la_cau_tu_choi_tra_loi(ans_no_rag or '')}]:")
+    print(f"    {ans_no_rag or '(Khong co phan hoi)'}")
+    print(f"  RAG ({info_1}) [Tu choi={la_cau_tu_choi_tra_loi(ans_rag or '')}]:")
+    print(f"    {ans_rag or '(Khong co phan hoi)'}")
 
 
 def _print_header(title: str) -> None:
@@ -304,6 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--asin", type=str, default=None, help="Loc ma san pham ASIN (chi ap dung cho nguon amazon)")
     parser.add_argument("--top-k", type=int, default=3, help="So doan truy xuat Top-K hien thi")
+    parser.add_argument("--live", action="store_true", help="Bat che do hoi dap truc tiep (truy xuat + goi LLM tra loi)")
+    parser.add_argument("--model", type=str, default="qwen/qwen3.8-27b", help="Ten mo hinh sinh khi chay --live")
     return parser
 
 
@@ -314,6 +471,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     args = build_parser().parse_args(argv)
+    if args.live:
+        live_source = "amazon" if args.source == "all" else args.source
+        live_k = args.top_k if args.top_k != 3 else 5
+        if args.query:
+            run_live_qa(
+                query=args.query,
+                source=live_source,
+                asin=args.asin,
+                top_k=live_k,
+                model_name=args.model,
+            )
+            return 0
+        print(f"Che do hoi dap truc tiep (source={live_source}, asin={args.asin or 'Global'}). Go 'exit' de thoat.")
+        while True:
+            try:
+                user_q = input("\nNhap cau hoi: ").strip()
+            except EOFError:
+                break
+            if not user_q or user_q.lower() in ("exit", "quit", "q"):
+                break
+            run_live_qa(
+                query=user_q,
+                source=live_source,
+                asin=args.asin,
+                top_k=live_k,
+                model_name=args.model,
+            )
+        return 0
+
     if args.query:
         run_step_2_retrieval(query=args.query, source=args.source, asin=args.asin, top_k=args.top_k)
         return 0

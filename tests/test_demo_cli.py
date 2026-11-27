@@ -2,8 +2,11 @@ import json
 from pathlib import Path
 
 from src.demo_cli import (
+    build_live_messages,
+    generate_live_answer,
     load_jsonl_records,
     main,
+    run_live_qa,
     search_bm25_chunks,
     summarize_test_records,
 )
@@ -65,3 +68,56 @@ def test_demo_cli_step_1_runs_cleanly(capsys):
     out = capsys.readouterr().out
     assert "Luy dang x2 : True" in out
     assert "Bao toan '5*3' & '<10 hours': True" in out
+
+
+def test_build_live_messages_amazon_and_shopify():
+    hits = [({"asin": "B002", "chunk_id": "c1", "passage_id": "p1", "text": "Only supports 110V."}, 8.5)]
+    no_rag_amz, rag_amz = build_live_messages("110V or 220V?", "amazon", hits, asin="B002")
+    assert "B002" in no_rag_amz[1]["content"]
+    assert "Only supports 110V." in rag_amz[1]["content"]
+
+    no_rag_pol, rag_pol = build_live_messages("What are chargeback fees?", "shopify", hits)
+    assert "Shopify Legal Policies" in rag_pol[0]["content"]
+    assert "[Passage 1 | p1]" in rag_pol[1]["content"]
+    assert "Policy Question" in no_rag_pol[1]["content"]
+
+
+def test_generate_live_answer_offline_fallback(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setattr("src.demo_cli._load_dotenv_into_env", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "src.demo_cli.lay_llm_config",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("No key")),
+    )
+    ans, info = generate_live_answer([{"role": "user", "content": "hi"}])
+    assert ans is None
+    assert "Offline" in info
+
+
+def test_run_live_qa_with_mock_generator(monkeypatch, tmp_path, capsys):
+    chunks_file = tmp_path / "chunks.jsonl"
+    chunks_file.write_text(
+        json.dumps({"asin": "B002", "chunk_id": "c1", "text": "Only supports 110V input."}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.demo_cli.ROOT", tmp_path)
+    (tmp_path / "data" / "processed").mkdir(parents=True)
+    chunks_file.replace(tmp_path / "data" / "processed" / "chunks_dev_recursive.jsonl")
+
+    calls = []
+
+    def fake_gen(msgs, model):
+        calls.append(len(msgs))
+        if "Retrieved Product Review Snippets" in msgs[-1]["content"]:
+            return "The adapter only supports 110V.", "MockLLM (0.10s)"
+        return "I do not have enough information.", "MockLLM (0.05s)"
+
+    run_live_qa("110V?", source="amazon", asin="B002", top_k=1, generator_fn=fake_gen)
+    out = capsys.readouterr().out
+    assert "Only supports 110V input." in out
+    assert "Tu choi=True" in out
+    assert "Tu choi=False" in out
+    assert len(calls) == 2
